@@ -97,14 +97,17 @@ export default function CommandDashboard() {
     }
   }, []);
 
-  // Poll /api/latest every 2 seconds for ESP32 data
+  // Poll /api/sos every 2 seconds for ESP32 data
   useEffect(() => {
     const pollInterval = setInterval(async () => {
       try {
-        const res = await fetch('/api/latest', { cache: 'no-store' });
+        const res = await fetch('/api/sos', { cache: 'no-store' });
         const json = await res.json();
-        if (json.hasSOS && json.data) {
-          const incoming: ESPSOSData = json.data;
+        if (json && json.lat && json.lon) {
+          // Time could be a JS date string from backend, convert to unix timestamp for comparison
+          const timestamp = new Date(json.time).getTime();
+          const incoming: ESPSOSData = { lat: json.lat, lon: json.lon, timestamp };
+          
           // Only trigger alert if this is new data
           if (incoming.timestamp > lastTimestampRef.current) {
             lastTimestampRef.current = incoming.timestamp;
