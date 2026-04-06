@@ -97,44 +97,32 @@ export default function CommandDashboard() {
     }
   }, []);
 
-  // Poll /api/sos every 2 seconds for ESP32 data
-  useEffect(() => {
-    const pollInterval = setInterval(async () => {
-      try {
-        const res = await fetch('/api/sos', { cache: 'no-store' });
-        const json = await res.json();
-        if (json && json.lat && json.lon) {
-          // Time could be a JS date string from backend, convert to unix timestamp for comparison
-          const timestamp = new Date(json.time).getTime();
-          const incoming: ESPSOSData = { lat: json.lat, lon: json.lon, timestamp };
-          
-          // Only trigger alert if this is new data
-          if (incoming.timestamp > lastTimestampRef.current) {
-            lastTimestampRef.current = incoming.timestamp;
-            setEspSOS(incoming);
-            
-            // Show SOS banner
-            setSosBannerVisible(true);
-            playSOSBeep();
-            
-            // Fly to the SOS location
-            setFlyToPos([incoming.lat, incoming.lon]);
+  // Simulate SOS with hardcoded frontend data
+  const triggerHardcodedSOS = useCallback(() => {
+    const lat = 10.039036;
+    const lon = 76.322670;
+    const timestamp = Date.now();
+    const incoming: ESPSOSData = { lat, lon, timestamp };
+    
+    lastTimestampRef.current = timestamp;
+    setEspSOS(incoming);
+    
+    // Show SOS banner and play audio beep
+    setSosBannerVisible(true);
+    playSOSBeep();
+    
+    // Fly to the SOS location
+    setFlyToPos([lat, lon]);
 
-            // Auto-hide banner after 10 seconds
-            if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
-            bannerTimeoutRef.current = setTimeout(() => setSosBannerVisible(false), 10000);
-          } else {
-            // Update position even if same timestamp (e.g., page reload)
-            setEspSOS(incoming);
-          }
-        }
-      } catch {
-        // silently ignore fetch errors
-      }
-    }, 2000);
-
-    return () => clearInterval(pollInterval);
+    // Auto-hide banner after 10 seconds
+    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
+    bannerTimeoutRef.current = setTimeout(() => setSosBannerVisible(false), 10000);
   }, [playSOSBeep]);
+
+  useEffect(() => {
+    // Automatically trigger SOS state on page load
+    triggerHardcodedSOS();
+  }, [triggerHardcodedSOS]);
 
   const sosVessels = vessels.filter((v: any) => v.status === 'SOS');
   const coastlinePos: [number, number] = [8.38, 76.95];
@@ -448,7 +436,7 @@ export default function CommandDashboard() {
               <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-mono)', background: 'rgba(0,0,0,0.2)', padding: '8px 12px', borderRadius: '8px' }}>
                 📡 Signal: {new Date(espSOS.timestamp).toLocaleString()}
               </div>
-              <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
+              <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 <a
                   href={`https://www.google.com/maps?q=${espSOS.lat},${espSOS.lon}`}
                   target="_blank"
@@ -462,6 +450,12 @@ export default function CommandDashboard() {
                   style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--glass-border)', color: 'white', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700 }}
                 >
                   🎯 FOCUS
+                </button>
+                <button
+                  onClick={triggerHardcodedSOS}
+                  style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(0,210,255,0.1)', border: '1px solid var(--accent-blue)', color: 'var(--accent-blue)', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 800, flexBasis: '100%' }}
+                >
+                  🔄 SIMULATE SOS
                 </button>
               </div>
             </div>
