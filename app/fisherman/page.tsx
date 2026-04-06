@@ -1,7 +1,7 @@
 'use client';
 
 import { useSimulation, IncoisData } from '@/lib/simulation';
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 
 export default function FishermanPage() {
   const { state, triggerSOS, resolveSOS, fetchLocationSafety } = useSimulation();
@@ -15,6 +15,10 @@ export default function FishermanPage() {
   const [queryLng, setQueryLng] = useState(vessel?.lng.toFixed(4) || '76.8921');
   const [liveSafety, setLiveSafety] = useState<IncoisData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isTracking, setIsTracking] = useState(false);
+  const watchIdRef = useRef<number | null>(null);
+  const [weather, setWeather] = useState<any | null>(null);
+  const [malayalamVerdict, setMalayalamVerdict] = useState<string>('');
 
   if (!vessel) return <div style={{ color: 'white', padding: '100px', textAlign: 'center' }}>⚙️ Syncing NavIC telemetry...</div>;
 
@@ -31,7 +35,78 @@ export default function FishermanPage() {
     setIsLoading(true);
     const data = await fetchLocationSafety(parseFloat(queryLat), parseFloat(queryLng));
     setLiveSafety(data);
+    // fetch weather via server-side proxy at /api/weather
+    try {
+      const resp = await fetch(`/api/weather?lat=${queryLat}&lon=${queryLng}`);
+      if (resp.ok) {
+        const w = await resp.json();
+        setWeather(w);
+        const verdict = evaluateSafetyVerdict(data, w);
+        setMalayalamVerdict(verdict);
+      } else {
+        const err = await resp.json().catch(() => ({}));
+        setWeather(null);
+        setMalayalamVerdict(err?.error || 'കാലാവസ്ഥാ സേവനം ലഭ്യമല്ല');
+      }
+    } catch (err) {
+      setWeather(null);
+      setMalayalamVerdict('വെബ്ബ് സേവനത്തെ ബന്ധിപ്പിക്കാൻ പരാജയപ്പെട്ടു.');
+    }
     setIsLoading(false);
+  };
+
+  const useMyLocationOnce = () => {
+    if (!('geolocation' in navigator)) {
+      setMalayalamVerdict('ഈ ബ്രൗസറിൽ ജിയോളൊക്കേഷൻ പിന്തുണയില്ല.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition((pos) => {
+      const lat = pos.coords.latitude.toFixed(4);
+      const lng = pos.coords.longitude.toFixed(4);
+      setQueryLat(lat);
+      setQueryLng(lng);
+    }, (err) => {
+      setMalayalamVerdict('സ്ഥലം ലഭ്യമല്ല — സജ്ജീകരണങ്ങൾ പരിശോധിക്കുക.');
+    }, { enableHighAccuracy: true, timeout: 8000 });
+  };
+
+  const toggleTracking = () => {
+    if (!('geolocation' in navigator)) {
+      setMalayalamVerdict('ജിയോളൊക്കേഷൻ പിന്തുണയില്ല.');
+      return;
+    }
+    if (isTracking) {
+      if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+      setIsTracking(false);
+      setMalayalamVerdict('ട്രാക്കിംഗ് നിർത്തി.');
+      return;
+    }
+    const id = navigator.geolocation.watchPosition((pos) => {
+      const lat = pos.coords.latitude.toFixed(4);
+      const lng = pos.coords.longitude.toFixed(4);
+      setQueryLat(lat);
+      setQueryLng(lng);
+    }, (err) => {
+      setMalayalamVerdict('ട്രാക്കിംഗ് ലഭ്യമാകുന്നില്ല.');
+    }, { enableHighAccuracy: true, maximumAge: 5000 });
+    watchIdRef.current = id as unknown as number;
+    setIsTracking(true);
+    setMalayalamVerdict('സ്ഥലം ട്രാക്കിംഗ് ആരംഭിച്ചു.');
+  };
+
+  const evaluateSafetyVerdict = (inc: IncoisData, w: any) => {
+    // inc.waveHeight (m), w.wind.speed (m/s), w.weather[0].main
+    const wave = inc?.waveHeight ?? 0;
+    const windMs = w?.wind?.speed ?? 0;
+    const windKmh = Math.round(windMs * 3.6);
+    const weatherMain = (w?.weather && w.weather[0] && w.weather[0].main) || '';
+
+    // priority unsafe conditions
+    if (/Thunderstorm|Tornado|Squall/i.test(weatherMain)) return `അപായസൂചകം: ശക്തമായ=${weatherMain}. തിരമാല ${wave}m, കാറ്റ് ${windKmh} km/h — കടലിലേക്കു പോകരുത്.`;
+    if (windMs >= 12 || wave > 2.0) return `അപായസൂചകം: തിരമാലയും/കാറ്റും അപകടകരം. തിരമാല ${wave}m, കാറ്റ് ${windKmh} km/h — പുറത്തേക്കു പോകരുത്.`;
+    if (windMs >= 6 || wave > 1.4) return `ജാഗ്രത: സാഹചര്യങ്ങള്‍ അസ്സല്‍തരം. തിരമാല ${wave}m, കാറ്റ് ${windKmh} km/h — ജാഗ്രത പാലിച്ച് പുറപ്പെടുക.`;
+    return `സുരക്ഷിതം: ഇത് സുരക്ഷിത കാലാവസ്ഥയാണ്. തിരമാല ${wave}m, കാറ്റ് ${windKmh} km/h — സുരക്ഷിതമായി മത്സ്യബന്ധനം കഴിയും.`;
   };
 
   const currentSafety = liveSafety || incoisData;
@@ -131,9 +206,16 @@ export default function FishermanPage() {
                 <input value={queryLat} onChange={e => setQueryLat(e.target.value)} placeholder="Lat" style={{ flex: 1, padding: '12px', background: 'rgba(0,0,0,0.3)', border: '1px solid var(--glass-border)', borderRadius: '10px', color: 'white', fontSize: '0.9rem', fontFamily: 'var(--font-mono)' }} />
                 <input value={queryLng} onChange={e => setQueryLng(e.target.value)} placeholder="Lng" style={{ flex: 1, padding: '12px', background: 'rgba(0,0,0,0.3)', border: '1px solid var(--glass-border)', borderRadius: '10px', color: 'white', fontSize: '0.9rem', fontFamily: 'var(--font-mono)' }} />
               </div>
-              <button onClick={handleCheckSafety} disabled={isLoading} style={{ width: '100%', padding: '15px', background: 'var(--accent-blue)', border: 'none', borderRadius: '12px', color: '#000', fontWeight: 900, cursor: 'pointer', marginTop: '5px', boxShadow: `0 0 20px ${isLoading ? 'transparent' : 'var(--accent-blue-glow)'}` }}>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                <button onClick={useMyLocationOnce} style={{ flex: 1, padding: '12px', background: 'var(--accent-green)', border: 'none', borderRadius: '10px', color: '#000', fontWeight: 800, cursor: 'pointer' }}>എന്റെ സ്ഥലം ഉപയോഗിക്കുക</button>
+                <button onClick={toggleTracking} style={{ padding: '12px 14px', background: isTracking ? '#ff5252' : 'var(--accent-blue)', border: 'none', borderRadius: '10px', color: '#000', fontWeight: 800, cursor: 'pointer' }}>{isTracking ? 'ട്രാക്കിംഗ് നിർത്തുക' : 'ട്രാക്കിംഗ് ആരംഭിക്കുക'}</button>
+              </div>
+              <button onClick={handleCheckSafety} disabled={isLoading} style={{ width: '100%', padding: '15px', background: 'var(--accent-blue)', border: 'none', borderRadius: '12px', color: '#000', fontWeight: 900, cursor: 'pointer', marginTop: '8px', boxShadow: `0 0 20px ${isLoading ? 'transparent' : 'var(--accent-blue-glow)'}` }}>
                 {isLoading ? 'സിസ്റ്റം പരിശോധിക്കുന്നു...' : 'സുരക്ഷാ പരിശോധന (CHECK)'}
               </button>
+              {malayalamVerdict && (
+                <div style={{ marginTop: '10px', padding: '12px', background: 'rgba(0,0,0,0.35)', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.04)', fontSize: '0.95rem' }}>{malayalamVerdict}</div>
+              )}
            </div>
 
            <div style={{ padding: '30px', background: `linear-gradient(135deg, ${safetyInfo.color}15, transparent)`, borderRadius: '24px', border: `2px solid ${safetyInfo.color}`, textAlign: 'center', boxShadow: `0 0 30px ${safetyInfo.color}10` }}>

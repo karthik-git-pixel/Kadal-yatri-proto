@@ -3,7 +3,7 @@
 import { useSimulation } from '@/lib/simulation';
 import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
 const MapContainer = dynamic(() => import('react-leaflet').then(mod => mod.MapContainer), { ssr: false });
 const TileLayer = dynamic(() => import('react-leaflet').then(mod => mod.TileLayer), { ssr: false });
@@ -11,6 +11,27 @@ const Marker = dynamic(() => import('react-leaflet').then(mod => mod.Marker), { 
 const Popup = dynamic(() => import('react-leaflet').then(mod => mod.Popup), { ssr: false });
 const Circle = dynamic(() => import('react-leaflet').then(mod => mod.Circle), { ssr: false });
 const Polyline = dynamic(() => import('react-leaflet').then(mod => mod.Polyline), { ssr: false });
+
+// Component to re-center the map when ESP32 SOS arrives
+const MapFlyTo = dynamic(() => import('react-leaflet').then(mod => {
+  const { useMap } = mod;
+  const FlyToComponent = ({ position }: { position: [number, number] | null }) => {
+    const map = useMap();
+    useEffect(() => {
+      if (position) {
+        map.flyTo(position, 14, { duration: 1.5 });
+      }
+    }, [position, map]);
+    return null;
+  };
+  return { default: FlyToComponent };
+}), { ssr: false });
+
+interface ESPSOSData {
+  lat: number;
+  lon: number;
+  timestamp: number;
+}
 
 export default function CommandDashboard() {
   const { state, resolveSOS, updateMarketItem, addPFZZone } = useSimulation();
@@ -22,9 +43,18 @@ export default function CommandDashboard() {
   const [newFish, setNewFish] = useState({ species: '', malayalam: '', port: '', price: '' });
   const [newPFZ, setNewPFZ] = useState({ lat: '', lng: '', name: '' });
 
+  // ESP32 SOS state
+  const [espSOS, setEspSOS] = useState<ESPSOSData | null>(null);
+  const [sosBannerVisible, setSosBannerVisible] = useState(false);
+  const [flyToPos, setFlyToPos] = useState<[number, number] | null>(null);
+  const lastTimestampRef = useRef<number>(0);
+  const sosSoundRef = useRef<HTMLAudioElement | null>(null);
+  const bannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const markets = Array.from(new Set(marketData.map(m => m.port)));
   const filteredMarket = marketData.filter(m => m.port === selectedDashboardMarket);
 
+  // Load Leaflet
   useEffect(() => {
     import('leaflet').then(mod => {
       const DefaultIcon = mod.icon({
@@ -37,6 +67,71 @@ export default function CommandDashboard() {
       setL(mod);
     });
   }, []);
+
+  // Create SOS alert sound (generated beep via Web Audio API)
+  const playSOSBeep = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      osc.type = 'square';
+      gain.gain.value = 0.15;
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+      setTimeout(() => {
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.connect(gain2);
+        gain2.connect(ctx.destination);
+        osc2.frequency.value = 660;
+        osc2.type = 'square';
+        gain2.gain.value = 0.15;
+        osc2.start();
+        osc2.stop(ctx.currentTime + 0.4);
+      }, 350);
+    } catch {
+      // ignore if Web Audio not supported
+    }
+  }, []);
+
+  // Poll /api/latest every 2 seconds for ESP32 data
+  useEffect(() => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/latest', { cache: 'no-store' });
+        const json = await res.json();
+        if (json.hasSOS && json.data) {
+          const incoming: ESPSOSData = json.data;
+          // Only trigger alert if this is new data
+          if (incoming.timestamp > lastTimestampRef.current) {
+            lastTimestampRef.current = incoming.timestamp;
+            setEspSOS(incoming);
+            
+            // Show SOS banner
+            setSosBannerVisible(true);
+            playSOSBeep();
+            
+            // Fly to the SOS location
+            setFlyToPos([incoming.lat, incoming.lon]);
+
+            // Auto-hide banner after 10 seconds
+            if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
+            bannerTimeoutRef.current = setTimeout(() => setSosBannerVisible(false), 10000);
+          } else {
+            // Update position even if same timestamp (e.g., page reload)
+            setEspSOS(incoming);
+          }
+        }
+      } catch {
+        // silently ignore fetch errors
+      }
+    }, 2000);
+
+    return () => clearInterval(pollInterval);
+  }, [playSOSBeep]);
 
   const sosVessels = vessels.filter((v: any) => v.status === 'SOS');
   const coastlinePos: [number, number] = [8.38, 76.95];
@@ -75,6 +170,13 @@ export default function CommandDashboard() {
       setNewPFZ({ lat: '', lng: '', name: '' });
     }
   };
+
+  const dismissBanner = () => {
+    setSosBannerVisible(false);
+    if (bannerTimeoutRef.current) clearTimeout(bannerTimeoutRef.current);
+  };
+
+  const espSOSAgeSeconds = espSOS ? Math.floor((Date.now() - espSOS.timestamp) / 1000) : null;
 
   return (
     <>
@@ -118,6 +220,103 @@ export default function CommandDashboard() {
           gap: 15px;
         }
 
+        /* ===== SOS ALERT BANNER ===== */
+        .sos-banner {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          z-index: 9999;
+          background: linear-gradient(135deg, #ff1a1a, #ff4d4d, #ff1a1a);
+          background-size: 400% 400%;
+          animation: sos-gradient-shift 2s ease infinite, sos-slide-down 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+          color: white;
+          padding: 16px 24px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          box-shadow: 0 4px 30px rgba(255, 26, 26, 0.6), 0 0 60px rgba(255, 26, 26, 0.3);
+          border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+        }
+        .sos-banner-content {
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          flex: 1;
+        }
+        .sos-banner-icon {
+          font-size: 2rem;
+          animation: sos-icon-pulse 1s ease-in-out infinite;
+        }
+        .sos-banner-text h3 {
+          font-size: 1.1rem;
+          font-weight: 900;
+          letter-spacing: 0.15em;
+          text-transform: uppercase;
+          text-shadow: 0 0 10px rgba(255,255,255,0.5);
+        }
+        .sos-banner-text p {
+          font-size: 0.8rem;
+          opacity: 0.9;
+          font-family: var(--font-mono);
+          margin-top: 2px;
+        }
+        .sos-banner-dismiss {
+          background: rgba(255, 255, 255, 0.2);
+          border: 1px solid rgba(255, 255, 255, 0.4);
+          color: white;
+          padding: 8px 18px;
+          border-radius: 8px;
+          cursor: pointer;
+          font-weight: 800;
+          font-size: 0.75rem;
+          letter-spacing: 0.1em;
+          transition: background 0.2s;
+          white-space: nowrap;
+        }
+        .sos-banner-dismiss:hover {
+          background: rgba(255, 255, 255, 0.35);
+        }
+
+        @keyframes sos-gradient-shift {
+          0% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+        @keyframes sos-slide-down {
+          from { transform: translateY(-100%); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes sos-icon-pulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.2); }
+        }
+
+        /* ===== ESP32 SOS CARD ===== */
+        .esp-sos-card {
+          background: linear-gradient(135deg, rgba(255, 26, 26, 0.15), rgba(255, 77, 77, 0.08));
+          border: 1px solid rgba(255, 77, 77, 0.5);
+          border-radius: 16px;
+          padding: 18px;
+          animation: esp-card-glow 2s ease-in-out infinite;
+        }
+        @keyframes esp-card-glow {
+          0%, 100% { box-shadow: 0 0 15px rgba(255, 77, 77, 0.2); }
+          50% { box-shadow: 0 0 30px rgba(255, 77, 77, 0.5); }
+        }
+        .esp-sos-dot {
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          background: #ff4d4d;
+          animation: esp-dot-blink 1s ease-in-out infinite;
+          display: inline-block;
+        }
+        @keyframes esp-dot-blink {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
+        }
+
         @media (max-width: 1200px) {
           .dashboard-grid {
             grid-template-columns: 280px 1fr 320px;
@@ -151,6 +350,15 @@ export default function CommandDashboard() {
             gap: 8px;
             flex-wrap: wrap;
           }
+          .sos-banner {
+            flex-direction: column;
+            gap: 12px;
+            text-align: center;
+          }
+          .sos-banner-content {
+            flex-direction: column;
+            gap: 8px;
+          }
         }
 
         @media (max-width: 480px) {
@@ -170,6 +378,20 @@ export default function CommandDashboard() {
         }
       `}</style>
 
+      {/* ===== SOS ALERT BANNER ===== */}
+      {sosBannerVisible && espSOS && (
+        <div className="sos-banner" id="sos-alert-banner">
+          <div className="sos-banner-content">
+            <div className="sos-banner-icon">🚨</div>
+            <div className="sos-banner-text">
+              <h3>⚠️ SOS RECEIVED — DISTRESS SIGNAL</h3>
+              <p>ESP32 GPS: {espSOS.lat.toFixed(6)}, {espSOS.lon.toFixed(6)} — {new Date(espSOS.timestamp).toLocaleTimeString()}</p>
+            </div>
+          </div>
+          <button className="sos-banner-dismiss" onClick={dismissBanner}>DISMISS</button>
+        </div>
+      )}
+
       <div className="dashboard-grid">
       
         {/* LEFT: FLEET STATUS & TELEMETRY */}
@@ -179,17 +401,68 @@ export default function CommandDashboard() {
                <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--accent-blue)' }}>🛰️ COMMAND</h2>
                <div style={{ fontSize: '0.6rem', color: 'rgba(255,255,255,0.4)', fontFamily: 'var(--font-mono)' }}>V.1.0-STABLE</div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
               <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: '14px', padding: '15px', border: '1px solid var(--glass-border)' }}>
                 <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'white' }}>{vessels.length}</div>
                 <div style={{ fontSize: '0.6rem', color: 'var(--accent-blue)', letterSpacing: '0.1em', fontWeight: 800 }}>TOTAL VESSELS</div>
               </div>
               <div style={{ background: sosVessels.length > 0 ? 'rgba(255,77,77,0.1)' : 'rgba(255,255,255,0.03)', borderRadius: '14px', padding: '15px', border: `1px solid ${sosVessels.length > 0 ? 'var(--accent-orange)' : 'var(--glass-border)'}` }}>
                 <div style={{ fontSize: '1.8rem', fontWeight: 800, color: sosVessels.length > 0 ? 'var(--accent-orange)' : 'white' }}>{sosVessels.length}</div>
-                <div style={{ fontSize: '0.6rem', color: 'var(--accent-orange)', letterSpacing: '0.1em', fontWeight: 800 }}>ACTIVE SOS</div>
+                <div style={{ fontSize: '0.6rem', color: 'var(--accent-orange)', letterSpacing: '0.1em', fontWeight: 800 }}>MESH SOS</div>
+              </div>
+              <div style={{ background: espSOS ? 'rgba(255,26,26,0.15)' : 'rgba(255,255,255,0.03)', borderRadius: '14px', padding: '15px', border: `1px solid ${espSOS ? '#ff4d4d' : 'var(--glass-border)'}`, transition: 'all 0.3s' }}>
+                <div style={{ fontSize: '1.8rem', fontWeight: 800, color: espSOS ? '#ff4d4d' : 'white', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {espSOS ? '1' : '0'}
+                  {espSOS && <span className="esp-sos-dot" />}
+                </div>
+                <div style={{ fontSize: '0.6rem', color: '#ff4d4d', letterSpacing: '0.1em', fontWeight: 800 }}>ESP32 SOS</div>
               </div>
             </div>
           </div>
+
+          {/* ESP32 SOS DETAIL CARD */}
+          {espSOS && (
+            <div className="glass-card esp-sos-card" id="esp32-sos-detail">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                <h3 style={{ fontSize: '0.8rem', color: '#ff4d4d', fontWeight: 800, letterSpacing: '0.1em', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span className="esp-sos-dot" />
+                  ESP32 LIVE SOS
+                </h3>
+                <span style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-mono)' }}>
+                  {espSOSAgeSeconds !== null && espSOSAgeSeconds < 60 ? `${espSOSAgeSeconds}s ago` : espSOSAgeSeconds !== null ? `${Math.floor(espSOSAgeSeconds / 60)}m ago` : ''}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
+                <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: '10px', padding: '12px' }}>
+                  <div style={{ fontSize: '0.55rem', color: 'var(--text-secondary)', letterSpacing: '0.1em', marginBottom: '4px' }}>LATITUDE</div>
+                  <div style={{ fontSize: '1rem', fontWeight: 800, color: '#ff4d4d', fontFamily: 'var(--font-mono)' }}>{espSOS.lat.toFixed(6)}</div>
+                </div>
+                <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: '10px', padding: '12px' }}>
+                  <div style={{ fontSize: '0.55rem', color: 'var(--text-secondary)', letterSpacing: '0.1em', marginBottom: '4px' }}>LONGITUDE</div>
+                  <div style={{ fontSize: '1rem', fontWeight: 800, color: '#ff4d4d', fontFamily: 'var(--font-mono)' }}>{espSOS.lon.toFixed(6)}</div>
+                </div>
+              </div>
+              <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.5)', fontFamily: 'var(--font-mono)', background: 'rgba(0,0,0,0.2)', padding: '8px 12px', borderRadius: '8px' }}>
+                📡 Signal: {new Date(espSOS.timestamp).toLocaleString()}
+              </div>
+              <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
+                <a
+                  href={`https://www.google.com/maps?q=${espSOS.lat},${espSOS.lon}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ flex: 1, padding: '10px', borderRadius: '8px', background: '#ff4d4d', border: 'none', color: 'white', fontWeight: 800, fontSize: '0.75rem', textAlign: 'center', textDecoration: 'none', cursor: 'pointer', letterSpacing: '0.05em' }}
+                >
+                  📍 OPEN IN MAPS
+                </a>
+                <button
+                  onClick={() => setFlyToPos([espSOS.lat, espSOS.lon])}
+                  style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--glass-border)', color: 'white', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700 }}
+                >
+                  🎯 FOCUS
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="glass-card" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <h3 style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', letterSpacing: '0.15em', fontWeight: 800, marginBottom: '5px' }}>TELEMETRY TRACKING</h3>
@@ -222,6 +495,9 @@ export default function CommandDashboard() {
                 <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                 <Circle center={coastlinePos} radius={500} color="var(--accent-blue)" fillColor="var(--accent-blue)" fillOpacity={0.4} />
                 
+                {/* Fly to ESP32 SOS location */}
+                <MapFlyTo position={flyToPos} />
+
                 {pfzZones.map((z: any) => (
                   <Circle key={z.id} center={[z.lat, z.lng]} radius={z.radius} pathOptions={{ color: 'var(--accent-green)', fillColor: 'var(--accent-green)', fillOpacity: 0.2 }} />
                 ))}
@@ -239,16 +515,70 @@ export default function CommandDashboard() {
                   </Marker>
                 ))}
                 {sosVessels.map((v: any) => <Polyline key={`mesh-${v.id}`} positions={[[v.lat, v.lng], coastlinePos]} color="orange" dashArray="8, 12" weight={2} />)}
+
+                {/* ===== ESP32 SOS MARKER ===== */}
+                {espSOS && (
+                  <>
+                    <Marker position={[espSOS.lat, espSOS.lon]}>
+                      <Popup>
+                        <div style={{ color: 'black', fontFamily: 'var(--font-sans)', padding: '10px' }}>
+                          <strong style={{ fontSize: '1.1rem', color: '#d32f2f' }}>🚨 ESP32 SOS</strong><br/>
+                          <div style={{ fontSize: '0.8rem', marginTop: '5px' }}>LAT: {espSOS.lat.toFixed(6)}</div>
+                          <div style={{ fontSize: '0.8rem' }}>LON: {espSOS.lon.toFixed(6)}</div>
+                          <div style={{ fontSize: '0.75rem', marginTop: '5px', color: '#666' }}>{new Date(espSOS.timestamp).toLocaleString()}</div>
+                          <a
+                            href={`https://www.google.com/maps?q=${espSOS.lat},${espSOS.lon}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ display: 'block', width: '100%', marginTop: '10px', background: '#d32f2f', padding: '8px', borderRadius: '6px', color: 'white', fontWeight: 800, textAlign: 'center', textDecoration: 'none' }}
+                          >
+                            OPEN IN GOOGLE MAPS
+                          </a>
+                        </div>
+                      </Popup>
+                    </Marker>
+                    {/* Pulsing red circle around ESP32 SOS location */}
+                    <Circle
+                      center={[espSOS.lat, espSOS.lon]}
+                      radius={2000}
+                      pathOptions={{
+                        color: '#ff1a1a',
+                        fillColor: '#ff1a1a',
+                        fillOpacity: 0.15,
+                        weight: 3,
+                        className: 'sos-pulse'
+                      }}
+                    />
+                    <Circle
+                      center={[espSOS.lat, espSOS.lon]}
+                      radius={4000}
+                      pathOptions={{
+                        color: '#ff4d4d',
+                        fillColor: '#ff4d4d',
+                        fillOpacity: 0.06,
+                        weight: 1,
+                        dashArray: '8, 8'
+                      }}
+                    />
+                    {/* Rescue line from ESP32 SOS to coast */}
+                    <Polyline
+                      positions={[[espSOS.lat, espSOS.lon], coastlinePos]}
+                      color="#ff1a1a"
+                      dashArray="12, 8"
+                      weight={3}
+                    />
+                  </>
+                )}
               </MapContainer>
             )}
             <div className="weather-overlay">
                <div className="glass-card" style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(5,11,24,0.95)', border: '1px solid var(--accent-blue-glow)' }}>
-                  <span style={{ fontSize: '1.5rem' }}>🌫️</span>
-                  <div><div style={{ fontSize: '0.55rem', color: 'var(--text-secondary)', letterSpacing: '0.1em' }}>WAVE</div><div style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--accent-blue)' }}>{incoisData.waveHeight}m</div></div>
+                 <span style={{ fontSize: '1.5rem' }}>🌫️</span>
+                 <div><div style={{ fontSize: '0.55rem', color: 'var(--text-secondary)', letterSpacing: '0.1em' }}>WAVE</div><div style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--accent-blue)' }}>{incoisData.waveHeight}m</div></div>
                </div>
                <div className="glass-card" style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(5,11,24,0.95)', border: '1px solid var(--accent-blue-glow)' }}>
-                  <span style={{ fontSize: '1.5rem' }}>🌪️</span>
-                  <div><div style={{ fontSize: '0.55rem', color: 'var(--text-secondary)', letterSpacing: '0.1em' }}>WIND</div><div style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--accent-blue)' }}>{incoisData.windSpeed}km/h</div></div>
+                 <span style={{ fontSize: '1.5rem' }}>🌪️</span>
+                 <div><div style={{ fontSize: '0.55rem', color: 'var(--text-secondary)', letterSpacing: '0.1em' }}>WIND</div><div style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--accent-blue)' }}>{incoisData.windSpeed}km/h</div></div>
                </div>
             </div>
           </div>
