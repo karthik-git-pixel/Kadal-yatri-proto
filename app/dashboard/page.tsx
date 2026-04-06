@@ -384,8 +384,8 @@ export default function CommandDashboard() {
           <div className="sos-banner-content">
             <div className="sos-banner-icon">🚨</div>
             <div className="sos-banner-text">
-              <h3>⚠️ SOS RECEIVED — DISTRESS SIGNAL</h3>
-              <p>ESP32 GPS: {espSOS.lat.toFixed(6)}, {espSOS.lon.toFixed(6)} — {new Date(espSOS.timestamp).toLocaleTimeString()}</p>
+            <h3>🚨 SOS ACTIVE</h3>
+            <p>ESP32 GPS: {espSOS.lat.toFixed(6)}, {espSOS.lon.toFixed(6)} — {new Date(espSOS.timestamp).toLocaleTimeString()}</p>
             </div>
           </div>
           <button className="sos-banner-dismiss" onClick={dismissBanner}>DISMISS</button>
