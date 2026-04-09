@@ -4,7 +4,19 @@ import Link from 'next/link';
 
 export default function Home() {
   return (
-    <main style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', gap: '40px', padding: '20px' }}>
+    <main style={{ 
+      display: 'flex', 
+      flexDirection: 'column', 
+      alignItems: 'center', 
+      justifyContent: 'center', 
+      minHeight: '100vh', 
+      gap: '40px', 
+      padding: '20px',
+      backgroundImage: 'linear-gradient(to bottom, rgba(3, 8, 18, 0.6), rgba(3, 8, 18, 0.95)), url("/hero-bg.png")',
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      backgroundRepeat: 'no-repeat'
+    }}>
       <div style={{ textAlign: 'center' }}>
         <h1 style={{ fontSize: '3.5rem', fontWeight: 900, letterSpacing: '-0.02em', background: 'linear-gradient(to right, #00d2ff, #00ff88)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>KADAL YATRI</h1>
         <p style={{ color: 'var(--text-secondary)', fontSize: '1.2rem', marginTop: '10px' }}>Empowering Small-Scale Fishers through Mesh-Networked Safety & Intelligence.</p>
